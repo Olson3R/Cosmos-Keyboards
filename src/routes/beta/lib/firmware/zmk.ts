@@ -32,7 +32,11 @@ export interface ZMKOptions {
   underGlowAtStart: boolean
   enableConsole: boolean
   enableStudio: boolean
+  microcontroller: 'lemon-wireless' | 'lemon-wired'
   wirelessVersion: 'v0.3' | 'v0.4'
+  wiredVersion?: 'v0.4' | 'v0.5'
+  splitTransport?: 'uart' | 'pio-usb'
+  linkPort?: 'pio' | 'native'
   /** When set, generate Miryoku multi-layer keymap. slotToPosition maps each
    *  MiryokuSlot to the ZMK logical key position (index in the hasPinsInMatrix
    *  filtered logicalKeys list). */
