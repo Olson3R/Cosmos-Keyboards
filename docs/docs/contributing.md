@@ -515,3 +515,107 @@ Cosmos uses [Material for Mkdocs](https://squidfunk.github.io/mkdocs-material/) 
 !!! tip "This is a `tip` Admonition"
 
     They're useful for providing further explanation that needs to be highlighted. You can also make them collapsible if their content is applicable to only some situations.
+
+## Contributing Code
+
+The guide has already covered using Git and GitHub to contribute to the repository, so there's no need to repeat it. The rest of this section will cover the background you'll need to make low-level changes to the generator.
+
+### Architecture
+
+Cosmos runs fully in-browser. However, as the diagram shows below, there is work done before site generation to build 3d models, documentation, and optimize assets, so that this work doesn't have to be repeated when users load the page.
+
+```
+┌────────────────────────────────────────────────────────────┐
+│  Browser                                                   │
+│  ┌──────────────────────────┐   ┌──────────────────────┐   │
+│  │  Main thread (Svelte UI) │   │  Web Workers         │   │
+│  │  src/routes/beta/        │◄──┤  src/lib/worker/     │   │
+│  │  src/lib/3d/ (Threlte)   │   │  geometry → model    │   │
+│  └──────────────┬───────────┘   └──────────┬───────────┘   │
+│                 │  comlink (RPC over postMessage)          │
+│                 └──────────────────────────┘               │
+└────────────────────────────────────────────────────────────┘
+        ▲
+        │ static GLB / STEP / type defs / compiled .proto
+        │
+┌────────────────────────────────────────────────────────────┐
+│  Build-time (Makefile)                                     │
+│  src/model_gen/  +  src/proto/  →  target/                 │
+└────────────────────────────────────────────────────────────┘
+```
+
+The runtime app is multiple threads bridged by [comlink](https://github.com/googlechromelabs/comlink) (which are encapsulated in a worker pool). The build step is a separate program: it produces files in `target/` that the runtime app then imports as plain assets.
+
+### Rendering Pipeline
+
+| File                               | Role                                                                                           |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `src/lib/worker/geometry.ts`       | Pure math. Where each key, wall, screw, microcontroller goes in 3D space.                      |
+| `src/lib/worker/cachedGeometry.ts` | Memoized higher-level wrapper over `geometry.ts` with inheritance for multiple keyboard types. |
+| `src/lib/worker/model.ts`          | Turns geometry into 3D solids using replicad/OpenCascade. Only ever used by worker threads.    |
+| `src/routes/beta/App.svelte`       | Schedules render tasks by passing user options to workers and collects mesh data results       |
+| `src/lib/3d`                       | Renders keyboards with Three.js using the collected mesh data                                  |
+|                                    |                                                                                                |
+
+There are two hard boundaries: Replicad/OpenCascade is never called in the main thread (hence `src/lib/worker/model.ts` is entirely run on worker threads), and web workers can also never touch the DOM. Other than that, things are fluid. For example, `src/lib/worker/geometry.ts` is used by both workers and the main thread.
+
+Adjacent helpers that are useful to know:
+
+- `geometry.intersections.ts` - all intersection math goes here. Cosmos relies heavily on intersection calculations for part placement and warning users about design problems.
+- `clipper.ts`, `concaveman.ts`, `concaveman-extra.ts` — 2D polygon ops used for plate generation.
+- `modeling/transformation.ts`, `modeling/transformation-ext.ts` — the `Trsf` and `ETrsf` classes used to position parts. `Trsf` is a generic transformation, while `ETrsf` is a wrapper around `Trsf` to preserve edit history for converting configuration to code.
+- `modeling/assembly.ts`, `modeling/bezier.ts`, `modeling/splitter.ts`, `modeling/supports.ts` — model-construction utilities.
+- `pro-patch/` — conditional pro-only extensions; safe to ignore in OSS clones.
+
+### Configuration and Serialization
+
+There are three config objects in Cosmos:
+
+- **`Cuttleform`** (defined in `src/lib/worker/config.ts`) describes a keyboard in full detail. Keys are put into an unsorted list. This is the input to the rendering pipeline.
+- **`CosmosKeyboard`** (defined in `src/lib/worker/config.cosmos.ts`) is a more user-facing descriptor of the keyboard. Keys are organized into clusters and columns.
+- **`Keyboard`** (defined in `src/lib/worker/config.serialize.ts`) is the representation of the keyboard right before serializing to protobuf. It's organized very similar to `CosmosKeyboard`, but properties look very different as they are combined and compressed to further save space before they're encoded. The code almost never directly interacts with `Keyboard`, as `config.serialize.ts` converts straight to and from `CosmosKeyboard` objects and the encoded URL string.
+
+Another important difference is that `Cuttleform` only represents one half of the split keyboard, as each half is rendered independently. On the other hand, `CosmosKeyboard` represents both halves. There are utilities in `config.cosmos.ts` to convert between from a `CosmosKeyboard` to `FullCuttleform` (a conglomerate of `Cuttleform` objects, so that a `FullCuttleform` represents an entire keyboard) and vice versa.
+
+!!! info "Fun Fact"
+
+    The Cosmos Keyboard Generator was originally named Cuttleform Keyboard Generator. The name is derived from cuttlefish, which are cephalopods that can camouflage by changing their skin color. Just like Cosmos, cuttlefish are extremely adaptable. 🐟
+
+#### Protocol Buffers and Compression
+
+To convert a `Keyboard` object to a string, the object is serialized using [Protocol Buffers](https://protobuf.dev/), and the resulting compact binary representation is encoded into base64. However, if you tried to directly to serialize a `Cuttleform` or `CosmosKeyboard` object using a protobuf, the resulting string would be huge!
+
+To reduce size, `src/proto/cosmosStructs.ts` defines structs for related sets of options that are serialized to a single integer. For example, if a switch has a keycap, the keycap's profile name, row (R1, R2, etc), legend (if just one letter), and homing assignment are all compressed together to one protobuf field.
+
+There are other files in the `proto` directory (`cuttleform.proto`, `manuform.proto`, etc), but they are old formats kept only for backwards compatability.
+
+#### Generated Files
+
+- Protobuf compilation: `protoc` compiles all `src/proto/*.proto` files to Typescript files in `target/proto/`.
+- Struct Routies: `src/proto/cosmosStructs.ts` dumps routines for encoding/decoding structs to `target/cosmosStructs.ts`.
+- Export mode autocompletion: `src/model_gen/genEditorTypes.ts` walks `config.ts` and emits `target/editorDeclarations.d.ts`, which the code editor Monaco loads.
+
+Anytime you run `make` (even without command line args) all of these generators are run if their inputs changed.
+
+### Asset Loading
+
+`src/lib/loaders/` loads the build-time artifacts on demand:
+
+- `gltfLoader.ts` — generic GLB loader used by the others.
+- `keycaps.ts`, `simplekeys.ts`, `parts.ts`, `simpleparts.ts`, `sockets.ts`, `boardElement.ts` — typed loaders for each artifact category.
+- `cacher.ts` — memory cache so repeat loads are fast.
+- `geometry.ts` — bridges loaded geometry to the worker.
+
+Geometric metadata about parts (independent of their meshes) lives in `src/lib/geometry/`: `keycaps.ts`, `microcontrollers.ts`, `screws.ts`, `socketsParts.ts`, `switches.ts`.
+
+### Routes
+
+| Route                        | Purpose                                                                                         |
+| ---------------------------- | ----------------------------------------------------------------------------------------------- |
+| `/beta` (`src/routes/beta/`) | The main generator. Where users design a keyboard.                                              |
+| `/scan`, `/scan2`            | Hand-scanning UIs. Processing in `src/routes/scan/lib/hand.ts` (uses MediaPipe Hands + OpenCV). |
+| `/parts`                     | Browser for the parts library.                                                                  |
+| `/keycaps`                   | Keycap profile browser.                                                                         |
+| `/embed`                     | Embeddable viewer used in the docs and blog.                                                    |
+| `/showcase`                  | Curated keyboard gallery.                                                                       |
+| `/pair`                      | Pairing flow for hand-scan handoff.                                                             |

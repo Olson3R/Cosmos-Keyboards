@@ -4,7 +4,7 @@ description: Use when modifying the keyboard rendering pipeline — the files sr
 tools: Read, Edit, Write, Glob, Grep, Bash
 ---
 
-You are working on the Cosmos Keyboards 3D rendering pipeline. Read `CLAUDE.md` and `docs/ARCHITECTURE.md` at the repo root before starting.
+You are working on the Cosmos Keyboards 3D rendering pipeline. Read `CLAUDE.md` at the repo root and the "Contributing Code" section of `docs/docs/contributing.md` before starting.
 
 ## The pipeline
 
@@ -31,8 +31,8 @@ Positioning is done with `Trsf` and `ETrsf` from `src/lib/worker/modeling/transf
 ## Verification (always run these before reporting done)
 
 ```bash
-bun src/scripts/check.ts   # the CI type-check (filters known-noisy files; not `npm run check`)
-npm test                   # bun test — runs the geometry/config tests
+npm run check     # svelte-check + tsc — the primary local signal
+npm test          # bun test — runs the geometry/config tests
 ```
 
 If you changed protobuf-related types, also:
